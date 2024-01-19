@@ -22,7 +22,6 @@ import scala.util.control.NonFatal
 
 import org.apache.spark.sql.catalyst.analysis._
 import org.apache.spark.sql.catalyst.dsl.expressions._
-import org.apache.spark.sql.catalyst.dsl.plans._
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
 import org.apache.spark.sql.catalyst.planning.{ExtractEquiJoinKeys, ExtractFiltersAndInnerJoins}
@@ -41,16 +40,18 @@ import org.apache.spark.util.Utils
 object RewriteArraysOverlapJoin extends Rule[LogicalPlan] {
   private def makePrime(p: LogicalPlan, arr: NamedExpression, alias: String) = {
     val exploded = Alias(Explode(arr), alias)(explicitMetadata = Some(arr.metadata))
-    val generate = ExtractGenerator(
+    val generate = SimpleAnalyzer.ExtractGenerator(
       Project(p.output :+ exploded, p)
     )
     (generate, generate.output.last)
   }
-  
+
   private def isIn(p: LogicalPlan, e: Expression) = p.output.map(_.expr).contains(e)
 
   def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-    case Join(left, right, joinType, Some(ArraysOverlap(arrA: NamedExpression, arrB: NamedExpression))) =>
+    case Join(left, right, joinType,
+      Some(ArraysOverlap(arrA: NamedExpression, arrB: NamedExpression)), joinHint) =>
+
       val (leftArray, rightArray) =
         if (isIn(left, arrA) && isIn(right, arrB)) {
           (arrA, arrB)
@@ -60,7 +61,8 @@ object RewriteArraysOverlapJoin extends Rule[LogicalPlan] {
       val (leftAlias, rightAlias) = ("explode_larr", "explode_rarr")
       val (leftPrime, leftExp) = makePrime(left, leftArray, leftAlias)
       val (rightPrime, rightExp) = makePrime(right, rightArray, rightAlias)
-      val joined = Join(leftPrime, rightPrime, joinType, Some(leftExp === rightExp))
+      val joined = Join(leftPrime, rightPrime, joinType, Some(EqualTo(leftExp, rightExp)),
+        joinHint)
       val dropped = Project(
         Seq(left, right).flatMap(_.output.map(_.expr)).map { case e: NamedExpression => e },
         joined
